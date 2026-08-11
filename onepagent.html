@@ -1758,7 +1758,7 @@ if ('serviceWorker' in navigator && location.protocol !== 'file:') {
             <input type="number" id="setDaytonaAutoDelete" min="0" placeholder="1440">
           </div>
         </div>
-        <div style="font-size:10px;color:var(--text-dim);line-height:1.5;margin-top:4px" data-i18n="settings.sandboxNote">When remote sandbox is active, only Bash is exposed and it runs inside a Daytona Linux container. PythonExec / JSExec / NodeExec / Pyodide tools are hidden — invoke python3, node, pip, etc. via Bash. Read/Write/Edit target Daytona first; /foo.js and /home/daytona/foo.js refer to the same sandbox file. Only files under /home/daytona/outputs are pulled back to VFS /outputs after Bash. Put final results in /home/daytona/outputs.</div>
+        <div style="font-size:10px;color:var(--text-dim);line-height:1.5;margin-top:4px" data-i18n="settings.sandboxNote">When remote sandbox is active, only Bash is exposed and it runs inside a Daytona Linux container. PythonExec / JSExec / NodeExec / Pyodide tools are hidden — invoke python3, node, pip, etc. via Bash. Read/Write/Edit target Daytona first; /foo.js and /home/daytona/foo.js refer to the same sandbox file. Files already mirrored from VFS are synced both ways after Bash; new sandbox files are imported only from /home/daytona/outputs. Put final results there.</div>
         <div style="display:flex;gap:6px;align-items:center;margin-top:8px">
           <button type="button" class="modal-btn secondary" id="setSandboxTestBtn" onclick="testDaytonaSandbox()" style="padding:6px 10px;font-size:11px" data-i18n="settings.sandboxTest">Test sandbox</button>
           <div id="setSandboxTestStatus" style="font-size:10px;color:var(--text-dim);min-height:14px;flex:1;white-space:pre-wrap;word-break:break-word"></div>
@@ -2385,7 +2385,7 @@ const I18N = {
     'settings.daytonaAutoArchive': 'DAYTONA_AUTO_ARCHIVE_INTERVAL',
     'settings.daytonaAutoDelete': 'DAYTONA_AUTO_DELETE_INTERVAL',
     'settings.daytonaMinutes': '(min)',
-    'settings.sandboxNote': 'When remote sandbox is active, only Bash is exposed and it runs inside a Daytona Linux container. PythonExec / JSExec / NodeExec / Pyodide tools are hidden — invoke python3, node, pip, etc. via Bash. Read/Write/Edit target Daytona first; /foo.js and /home/daytona/foo.js refer to the same sandbox file. Only files under /home/daytona/outputs are pulled back to VFS /outputs after Bash. Put final results in /home/daytona/outputs.',
+    'settings.sandboxNote': 'When remote sandbox is active, only Bash is exposed and it runs inside a Daytona Linux container. PythonExec / JSExec / NodeExec / Pyodide tools are hidden — invoke python3, node, pip, etc. via Bash. Read/Write/Edit target Daytona first; /foo.js and /home/daytona/foo.js refer to the same sandbox file. Files already mirrored from VFS are synced both ways after Bash; new sandbox files are imported only from /home/daytona/outputs. Put final results there.',
     'settings.sandboxTest': 'Test sandbox',
     'settings.sandboxTestRunning': 'Creating sandbox and running echo + uname …',
     'settings.sandboxTestOk': 'Sandbox OK',
@@ -2848,7 +2848,7 @@ const I18N = {
     'settings.daytonaAutoArchive': 'DAYTONA_AUTO_ARCHIVE_INTERVAL — 自动归档间隔',
     'settings.daytonaAutoDelete': 'DAYTONA_AUTO_DELETE_INTERVAL — 自动删除间隔（归档后）',
     'settings.daytonaMinutes': '（分钟）',
-    'settings.sandboxNote': '启用远程沙箱后，仅暴露 Bash，运行在 Daytona Linux 容器内；PythonExec / JSExec / NodeExec / Pyodide 工具会被隐藏 —— 通过 Bash 调用 python3 / node / pip 等。Read/Write/Edit 优先操作 Daytona；/foo.js 与 /home/daytona/foo.js 指向同一个沙箱文件。Bash 后只会把 /home/daytona/outputs 拉回到 VFS /outputs。最终结果请输出到 /home/daytona/outputs。',
+    'settings.sandboxNote': '启用远程沙箱后，仅暴露 Bash，运行在 Daytona Linux 容器内；PythonExec / JSExec / NodeExec / Pyodide 工具会被隐藏 —— 通过 Bash 调用 python3 / node / pip 等。Read/Write/Edit 优先操作 Daytona；/foo.js 与 /home/daytona/foo.js 指向同一个沙箱文件。已从 VFS 镜像到沙箱的文件会在 Bash 后双向同步；沙箱新建文件仍只从 /home/daytona/outputs 导入。最终结果请输出到该目录。',
     'settings.sandboxTest': '测试沙箱',
     'settings.sandboxTestRunning': '正在创建沙箱并运行 echo + uname …',
     'settings.sandboxTestOk': '沙箱可用',
@@ -3699,7 +3699,7 @@ const _daytonaPending = {};                              // convId -> Promise<sa
 const DAYTONA_WORKSPACE = '/home/daytona';
 const DAYTONA_OUTPUTS_VFS_PREFIX = '/outputs';
 const DAYTONA_OUTPUTS_REMOTE_PREFIX = DAYTONA_WORKSPACE + DAYTONA_OUTPUTS_VFS_PREFIX;
-// Safety caps for per-call VFS upload and outputs-only pullback.
+// Safety caps for each VFS/sandbox reconciliation.
 const DAYTONA_SYNC_MAX_FILES = 2000;
 const DAYTONA_SYNC_MAX_BYTES = 100 * 1024 * 1024;
 // Paths excluded from sync (large or session-local).
@@ -3711,6 +3711,18 @@ function _shouldSkipSyncPath(p) {
 }
 function _isDaytonaOutputsPath(p) {
   return p === DAYTONA_OUTPUTS_VFS_PREFIX || p.startsWith(DAYTONA_OUTPUTS_VFS_PREFIX + '/');
+}
+function _daytonaShellQuote(value) { return `'${String(value).replace(/'/g, "'\\''")}'`; }
+function _daytonaAncestorPaths(paths) {
+  const out = new Set();
+  for (const path of paths) {
+    let parent = String(path || '').replace(/\/[^/]+$/, '');
+    while (parent && parent !== '/') {
+      out.add(parent);
+      parent = parent.replace(/\/[^/]+$/, '');
+    }
+  }
+  return out;
 }
 
 function _daytonaHeaders(cfg, extra) {
@@ -3871,33 +3883,58 @@ const daytonaClient = {
     const sandboxId = await this.ensureSandbox(convId);
     const cfg = getSandboxConfig();
     const resp = await _daytonaToolboxFetch(cfg, sandboxId, '/files/download?path=' + encodeURIComponent(path),
-      { method: 'GET', _raw: true });
+      { method: 'GET', cache: 'no-store', _raw: true });
     const buf = new Uint8Array(await resp.arrayBuffer());
     return asBytes ? buf : new TextDecoder().decode(buf);
   },
 
-  // Recursive listing via `find` execed in the sandbox — restricted to outputs.
-  async listChanged(convId, sinceMs) {
+  // List tracked VFS files plus the outputs tree. New non-output sandbox files
+  // stay remote until the user explicitly exposes them through /outputs.
+  async listFiles(convId, trackedVfsPaths = []) {
     const sandboxId = await this.ensureSandbox(convId);
     const cfg = getSandboxConfig();
-    // When sinceMs is provided, filter server-side with `find -newermt` so we
-    // only list files modified after the cutoff instead of re-listing the
-    // whole outputs tree on every Bash call. The client-side mtime check
-    // below stays as a safety net. `-newermt @<epoch>` uses epoch seconds.
-    const newer = (sinceMs && sinceMs > 0) ? ` -newermt @${Math.floor(sinceMs / 1000)}` : '';
-    const cmd = "mkdir -p " + DAYTONA_OUTPUTS_REMOTE_PREFIX + " && find " + DAYTONA_OUTPUTS_REMOTE_PREFIX + newer + " -type f -printf '%T@ %s %p\\n' 2>/dev/null | head -n 2000";
+    const candidates = [...new Set([...trackedVfsPaths, ..._daytonaAncestorPaths(trackedVfsPaths)])]
+      .filter(path => path && path !== '/' && !_isDaytonaOutputsPath(path) && !_shouldSkipSyncPath(path));
+    const queryPaths = candidates.slice(0, DAYTONA_SYNC_MAX_FILES);
+    const sentinel = '__ONEPAGENT_VFS_LIST_COMPLETE_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '__';
+    const trackedFind = queryPaths.map(path => {
+      const remotePath = _daytonaShellQuote(DAYTONA_WORKSPACE + path);
+      const parentPath = _daytonaShellQuote((DAYTONA_WORKSPACE + path).replace(/\/[^/]+$/, '') || '/');
+      // Missing tracked files are valid deletions. An existing but unreadable
+      // parent is not: fail the listing so it cannot masquerade as a deletion.
+      return 'if [ -f ' + remotePath + ' ]; then find ' + remotePath
+        + " -maxdepth 0 -type f -printf '%T@ %s %p\\n' >> \"$onepagent_list\" || exit 12; "
+        + 'elif [ ! -e ' + remotePath + ' ] && [ -e ' + parentPath + ' ] && [ ! -x ' + parentPath + ' ]; then exit 12; fi; ';
+    }).join('');
+    // Build the complete result in a temporary file before capping stdout. The
+    // sentinel is emitted only when every scan succeeds and the cap is not hit.
+    const cmd = 'onepagent_list=$(mktemp /tmp/onepagent-vfs-list.XXXXXX) || exit 10; '
+      + 'trap \'rm -f -- "$onepagent_list"\' EXIT; '
+      + 'mkdir -p -- ' + _daytonaShellQuote(DAYTONA_OUTPUTS_REMOTE_PREFIX) + ' || exit 11; '
+      + 'find ' + _daytonaShellQuote(DAYTONA_OUTPUTS_REMOTE_PREFIX)
+      + " -type f -printf '%T@ %s %p\\n' > \"$onepagent_list\" || exit 12; "
+      + trackedFind
+      + 'onepagent_count=$(wc -l < "$onepagent_list") || exit 13; '
+      + 'head -n ' + (DAYTONA_SYNC_MAX_FILES + 1) + ' "$onepagent_list" || exit 14; '
+      + 'if [ "$onepagent_count" -le ' + DAYTONA_SYNC_MAX_FILES + ' ]; then printf \'%s\\n\' '
+      + _daytonaShellQuote(sentinel) + ' || exit 15; fi';
     const r = await _daytonaToolboxFetch(cfg, sandboxId, '/process/execute',
       { method: 'POST', body: JSON.stringify({ command: cmd, cwd: DAYTONA_WORKSPACE, timeout: 30 }) });
-    const text = (r && (r.result ?? r.stdout ?? '')) || '';
+    const result = _normalizeExecResult(r);
+    const lines = String(result.stdout || '').split(/\r?\n/);
+    const complete = !result.exitCode && lines.some(line => line === sentinel);
     const out = [];
-    for (const line of String(text).split('\n')) {
+    for (const line of lines) {
       const m = line.match(/^(\d+(?:\.\d+)?)\s+(\d+)\s+(.+)$/);
       if (!m) continue;
       const mtime = Math.round(parseFloat(m[1]) * 1000);
-      if (sinceMs && mtime < sinceMs) continue;
       out.push({ path: m[3], size: parseInt(m[2], 10) || 0, mtime });
     }
-    return out;
+    const queryTruncated = candidates.length > queryPaths.length || out.length > DAYTONA_SYNC_MAX_FILES;
+    const error = result.exitCode
+      ? (result.stderr || ('sandbox file listing exited ' + result.exitCode))
+      : (!complete && !queryTruncated ? 'sandbox file listing did not finish' : '');
+    return { files: out, incomplete: !complete || queryTruncated, queryTruncated, error };
   },
 
   // /process/execute uses timeout in SECONDS
@@ -3958,44 +3995,88 @@ function _base64ToU8(b64) {
   } catch { return new Uint8Array(0); }
 }
 
-// Per-conversation sync state lives on the session object: syncedIn maps local
-// VFS path -> fingerprint, syncedOut maps remote path -> mtime. markVfsTouched
-// is kept as a no-op shim so existing callers don't break.
+// Per-conversation sync state lives on the Daytona session. syncedIn is the
+// last reconciled VFS fingerprint; syncedOut is the last observed remote mtime.
 function markVfsTouched() {}
 
 function _vfsFingerprint(node) {
-  if (!node || node.type !== 'file') return '';
+  if (!node || node.type !== 'file') return null;
   if (node.binary) return 'b:' + (node.hash || ('s' + (node.size || 0)));
   const size = (node.content || '').length;
   return 't:' + size + ':' + (node.modified || 0);
 }
 
-function _walkAllVfsFiles() {
+function _walkAllVfsFiles(root = vfs) {
   const out = [];
   vfsWalk('/', (path, node) => {
     if (node.type === 'file') out.push({ path, node });
-  });
+  }, root);
   return out;
 }
 
-// Push every VFS file into DAYTONA_WORKSPACE, skipping anything whose fingerprint
-// matches the last successful upload for this sandbox.
-async function syncVfsToRemote(convId, _input) {
-  // Ensure the sandbox exists BEFORE walking/uploading. Previously this bailed
-  // when no session existed, while ensureSandbox only ran inside exec — so the
-  // FIRST remote exec in a conversation ran in an empty sandbox with none of
-  // the VFS files synced. syncIn must not mask the real error here: if sandbox
-  // creation fails, let exec surface it.
-  try { await daytonaClient.ensureSandbox(convId); }
-  catch (e) { /* fall through; exec will report the underlying failure */ }
+function _daytonaEditorState(convId, root, path) {
+  if (visibleConvId !== convId) return null;
+  const viewer = document.getElementById('fileViewer');
+  const shownPath = document.getElementById('fvPath')?.textContent || '';
+  if (!viewer?.classList.contains('show') || normPath(shownPath) !== path) return null;
+  const area = document.getElementById('feEditArea');
+  const node = vfsResolve(path, root);
+  return {
+    editing: !!area,
+    dirty: !!area && node?.type === 'file' && !node.binary && area.value !== (node.content || ''),
+    text: area?.value,
+  };
+}
+
+function _daytonaConflictPath(root, path, side = 'local') {
+  let candidate = path + '.' + side + '-conflict-' + Date.now();
+  while (vfsResolve(candidate, root)) candidate += '-1';
+  return candidate;
+}
+
+async function _preserveLocalConflict(root, path, node, editor) {
+  if (node?.type !== 'file' && !editor?.dirty) return '';
+  const conflictPath = _daytonaConflictPath(root, path);
+  if (editor?.dirty) {
+    const result = vfsWrite(conflictPath, editor.text || '', true, root);
+    if (result.error) throw new Error(result.error);
+  } else if (node.binary) {
+    const bytes = await vfsGetBinary(path, root);
+    if (!bytes) throw new Error('binary data unavailable');
+    await vfsWriteBinary(conflictPath, bytes, true, root);
+  } else {
+    const result = vfsWrite(conflictPath, node.content || '', true, root);
+    if (result.error) throw new Error(result.error);
+  }
+  return conflictPath;
+}
+
+async function _writeRemoteBytesToVfs(root, path, bytes) {
+  if (vfsResolve(path, root)?.type === 'dir') throw new Error('refusing to replace a VFS directory with a file');
+  if (_looksLikeText(bytes)) {
+    const result = vfsWrite(path, new TextDecoder('utf-8', { fatal: false }).decode(bytes), true, root);
+    if (result.error) throw new Error(result.error);
+  } else {
+    await vfsWriteBinary(path, bytes, true, root);
+  }
+}
+
+async function _daytonaSyncExec(convId, command) {
+  const result = await daytonaClient.execShell(convId, command);
+  if (result.exitCode) throw new Error(result.stderr || result.stdout || ('exit ' + result.exitCode));
+  return result;
+}
+
+// Upload local-only changes after syncVfsFromRemote has reconciled remote-only
+// changes and conflicts. This ordering prevents a stale VFS write from winning.
+async function syncVfsToRemote(convId, root = vfs) {
+  await daytonaClient.ensureSandbox(convId);
   const sess = window._daytonaSessions[convId];
-  if (!sess) return { pushed: 0, skipped: 0, bytesPushed: 0 };
   if (!sess.syncedIn) sess.syncedIn = new Map();
-  const allFiles = _walkAllVfsFiles();
+  if (!sess.syncedOut) sess.syncedOut = new Map();
+  const warnings = [];
+  const allFiles = _walkAllVfsFiles(root);
   const presentPaths = new Set();
-  // Phase 1: classify each present file and collect parent dirs for the ones
-  // that actually need uploading (fingerprint changed). mkdir only runs when
-  // there is real work, avoiding a round-trip on every no-op syncIn.
   const uploadCandidates = [];
   const dirsToCreate = new Set();
   let skipped = 0;
@@ -4003,111 +4084,231 @@ async function syncVfsToRemote(convId, _input) {
     if (_shouldSkipSyncPath(path)) continue;
     presentPaths.add(path);
     const fp = _vfsFingerprint(node);
-    if (sess.syncedIn.get(path) === fp) { skipped++; continue; }
+    if (sess.syncedIn.has(path) && sess.syncedIn.get(path) === fp) { skipped++; continue; }
     uploadCandidates.push({ path, node, fp });
-    // /files/upload to a deep path whose parent dir doesn't exist in the
-    // sandbox fails and is silently swallowed below — collect parents and
-    // mkdir -p them first.
     const parent = path.replace(/\/[^/]+$/, '');
-    if (parent && parent !== '/' && !dirsToCreate.has(parent)) dirsToCreate.add(parent);
+    if (parent && parent !== '/') dirsToCreate.add(parent);
+  }
+  const deletedLocally = [...sess.syncedIn.keys()]
+    .filter(path => !presentPaths.has(path) && !_shouldSkipSyncPath(path) && path !== '/');
+  if (deletedLocally.length) {
+    try {
+      await _daytonaSyncExec(convId, 'rm -f -- ' + deletedLocally.map(path => _daytonaShellQuote(DAYTONA_WORKSPACE + path)).join(' '));
+      for (const path of deletedLocally) {
+        sess.syncedIn.delete(path);
+        sess.syncedOut.delete(DAYTONA_WORKSPACE + path);
+      }
+    } catch (e) { warnings.push('Could not apply VFS deletions in the sandbox: ' + (e?.message || e)); }
   }
   if (dirsToCreate.size) {
     try {
-      await daytonaClient.execShell(convId, 'mkdir -p -- ' + [...dirsToCreate].map(p => `'${(DAYTONA_WORKSPACE + p).replace(/'/g, "'\\''")}'`).join(' '));
-    } catch (e) { console.warn('syncIn mkdir failed:', e?.message || e); }
+      await _daytonaSyncExec(convId, 'mkdir -p -- ' + [...dirsToCreate].map(p => _daytonaShellQuote(DAYTONA_WORKSPACE + p)).join(' '));
+    } catch (e) { warnings.push('Could not create sandbox directories: ' + (e?.message || e)); }
   }
-  // Phase 2: upload the changed files, honoring cumulative caps.
   let pushed = 0, bytesPushed = 0;
   for (const { path, node, fp } of uploadCandidates) {
-    if (pushed >= DAYTONA_SYNC_MAX_FILES || bytesPushed >= DAYTONA_SYNC_MAX_BYTES) break;
-    try {
-      if (node.binary) {
-        const bytes = await vfsGetBinary(path);
-        if (!bytes) continue;
-        if (bytesPushed + bytes.length > DAYTONA_SYNC_MAX_BYTES) continue;
-        await daytonaClient.writeFile(convId, DAYTONA_WORKSPACE + path, bytes);
-        bytesPushed += bytes.length;
-      } else {
-        const text = node.content || '';
-        // Count UTF-8 bytes, not UTF-16 code units, so the MAX_BYTES cap
-        // matches what writeFile actually uploads for non-ASCII content.
-        const byteLen = new TextEncoder().encode(text).length;
-        if (bytesPushed + byteLen > DAYTONA_SYNC_MAX_BYTES) continue;
-        await daytonaClient.writeFile(convId, DAYTONA_WORKSPACE + path, text);
-        bytesPushed += byteLen;
-      }
-      sess.syncedIn.set(path, fp);
-      pushed++;
-    } catch (e) { console.warn('syncIn skip', path, e?.message || e); }
-  }
-  // Drop fingerprints for paths that no longer exist locally so a re-created
-  // file later forces a fresh upload, AND delete the stale copies from the
-  // sandbox so `ls` doesn't show ghost files that were removed in VFS.
-  const toDeleteRemote = [];
-  for (const cached of [...sess.syncedIn.keys()]) {
-    if (!presentPaths.has(cached)) {
-      sess.syncedIn.delete(cached);
-      if (!_shouldSkipSyncPath(cached) && cached !== '/') {
-        toDeleteRemote.push(DAYTONA_WORKSPACE + cached);
-      }
+    if (pushed >= DAYTONA_SYNC_MAX_FILES) {
+      warnings.push('VFS upload stopped at the ' + DAYTONA_SYNC_MAX_FILES + '-file safety limit.');
+      break;
     }
-  }
-  if (toDeleteRemote.length) {
     try {
-      await daytonaClient.execShell(convId, 'rm -f -- ' + toDeleteRemote.map(p => `'${p.replace(/'/g, "'\\''")}'`).join(' '));
-    } catch (e) { console.warn('syncIn remote cleanup failed:', e?.message || e); }
+      let content, byteLen;
+      if (node.binary) {
+        content = await vfsGetBinary(path, root);
+        if (!content) throw new Error('binary data unavailable');
+        byteLen = content.length;
+      } else {
+        content = node.content || '';
+        byteLen = new TextEncoder().encode(content).length;
+      }
+      if (bytesPushed + byteLen > DAYTONA_SYNC_MAX_BYTES) {
+        warnings.push('Skipped ' + path + ': VFS upload reached the 100 MiB safety limit.');
+        continue;
+      }
+      await daytonaClient.writeFile(convId, DAYTONA_WORKSPACE + path, content);
+      sess.syncedIn.set(path, fp);
+      bytesPushed += byteLen;
+      pushed++;
+    } catch (e) { warnings.push('Could not upload ' + path + ': ' + (e?.message || e)); }
   }
-  return { pushed, skipped, bytesPushed };
+  return { pushed, skipped, bytesPushed, warnings };
 }
 
-// Pull only result files under /outputs from the sandbox workspace. Other
-// sandbox changes stay remote and are not mirrored back into the VFS.
-async function syncVfsFromRemote(convId, sinceMs) {
+// Reconcile every previously synced file, while importing new files only from
+// /outputs. Remote wins the original path on a conflict; the local version is
+// first saved beside it as *.local-conflict-<timestamp>.
+async function syncVfsFromRemote(convId, root = vfs) {
   const sess = window._daytonaSessions[convId];
-  if (!sess) return { pulled: 0, skipped: 0 };
+  if (!sess) return { pulled: 0, skipped: 0, warnings: [], conflicts: [], changedPaths: [], deletedPaths: [], incomplete: false };
+  if (!sess.syncedIn) sess.syncedIn = new Map();
   if (!sess.syncedOut) sess.syncedOut = new Map();
-  let entries;
-  try { entries = await daytonaClient.listChanged(convId, sinceMs || 0); }
-  catch (e) { console.warn('listChanged failed:', e?.message || e); return { pulled: 0, skipped: 0 }; }
-  // Detect the silent truncation from `find ... | head -n 2000`: if we hit the
-  // cap, files beyond it are never pulled back, so surface a warning.
-  if (entries.length >= DAYTONA_SYNC_MAX_FILES) {
-    console.warn('syncOut: outputs listing hit DAYTONA_SYNC_MAX_FILES cap (' + DAYTONA_SYNC_MAX_FILES + '); some files may not be pulled back.');
+  const tracked = new Set([
+    ...sess.syncedIn.keys(),
+    ...[...sess.syncedOut.keys()].map(path => path.startsWith(DAYTONA_WORKSPACE) ? path.slice(DAYTONA_WORKSPACE.length) : ''),
+  ].filter(path => path && path !== '/' && !_shouldSkipSyncPath(path)));
+  const trackedAncestors = _daytonaAncestorPaths(tracked);
+  const listing = await daytonaClient.listFiles(convId, [...tracked]);
+  const listed = listing.files || [];
+  const incomplete = !!listing.incomplete || !!listing.queryTruncated || listed.length > DAYTONA_SYNC_MAX_FILES;
+  const warnings = incomplete
+    ? ['Sandbox file listing was incomplete'
+      + (listing.error ? ': ' + listing.error : ' or exceeded the ' + DAYTONA_SYNC_MAX_FILES + '-file safety limit')
+      + '; remote deletions and local uploads were not applied.']
+    : [];
+  if (incomplete) {
+    return { pulled: 0, skipped: 0, bytesPulled: 0, warnings, conflicts: [], changedPaths: [], deletedPaths: [], incomplete: true };
   }
-  let pulled = 0, skipped = 0;
-  const seen = new Set();
-  for (const f of entries) {
-    if (pulled >= DAYTONA_SYNC_MAX_FILES) break;
-    const remotePath = f.path;
-    if (!remotePath || !remotePath.startsWith(DAYTONA_WORKSPACE + '/')) continue;
-    const localPath = remotePath.slice(DAYTONA_WORKSPACE.length) || '/';
-    if (!_isDaytonaOutputsPath(localPath)) continue;
-    if (_shouldSkipSyncPath(localPath)) continue;
-    seen.add(remotePath);
-    const prevMtime = sess.syncedOut.get(remotePath) || 0;
-    if (prevMtime && f.mtime && f.mtime <= prevMtime) { skipped++; continue; }
+  const remoteFiles = new Map();
+  for (const file of listed.slice(0, DAYTONA_SYNC_MAX_FILES)) {
+    if (!file.path?.startsWith(DAYTONA_WORKSPACE + '/')) continue;
+    const localPath = file.path.slice(DAYTONA_WORKSPACE.length) || '/';
+    if (_shouldSkipSyncPath(localPath)
+      || (!_isDaytonaOutputsPath(localPath) && !tracked.has(localPath) && !trackedAncestors.has(localPath))) continue;
+    const previous = remoteFiles.get(localPath);
+    if (!previous || file.mtime >= previous.mtime) remoteFiles.set(localPath, file);
+  }
+  let pulled = 0, skipped = 0, bytesPulled = 0;
+  const conflicts = [], changedPaths = [], deletedPaths = [];
+  const remoteLocalPaths = [...remoteFiles.keys()];
+  // A tracked file can become a remote directory whose descendants appear in
+  // the same listing. Remove/preserve that file before writing those children.
+  // ponytail: both path sets are capped at 2,000; use a prefix index if that cap grows.
+  for (const localPath of tracked) {
+    const node = vfsResolve(localPath, root);
+    if (node?.type !== 'file' || remoteFiles.has(localPath)
+      || !remoteLocalPaths.some(path => path.startsWith(localPath + '/'))) continue;
+    const editor = _daytonaEditorState(convId, root, localPath);
+    const localBaseKnown = sess.syncedIn.has(localPath);
+    const localDirty = !!editor?.dirty
+      || (localBaseKnown ? _vfsFingerprint(node) !== sess.syncedIn.get(localPath) : true);
+    try {
+      let conflictPath = '';
+      if (localDirty) {
+        conflictPath = await _preserveLocalConflict(root, localPath, node, editor);
+        conflicts.push({ path: localPath, localCopy: conflictPath, remoteDirectory: true });
+        if (conflictPath) changedPaths.push(conflictPath);
+      }
+      const result = vfsDelete(localPath, true, root);
+      if (result.error) throw new Error(result.error);
+      sess.syncedIn.delete(localPath);
+      sess.syncedOut.delete(DAYTONA_WORKSPACE + localPath);
+      deletedPaths.push(localPath);
+      warnings.push('The sandbox replaced tracked file ' + localPath + ' with a directory'
+        + (conflictPath ? '; saved the local version as ' + conflictPath + '.' : '.'));
+      if (editor?.editing) warnings.push('The sandbox replaced open editor ' + localPath + ' with a directory; unsaved editor text was preserved separately.');
+    } catch (e) { warnings.push('Could not prepare sandbox directory ' + localPath + ' in VFS: ' + (e?.message || e)); }
+  }
+  const protectedLocalDirs = new Set([...tracked].filter(path => vfsResolve(path, root)?.type === 'dir'));
+  for (const [localPath, file] of remoteFiles) {
+    const remotePath = file.path;
+    const previousRemoteKnown = sess.syncedOut.has(remotePath);
+    const previousMtime = sess.syncedOut.get(remotePath);
+    const remoteChanged = !previousRemoteKnown || previousMtime == null || !file.mtime || file.mtime !== previousMtime;
+    const node = vfsResolve(localPath, root);
+    const localFingerprint = _vfsFingerprint(node);
+    const localBaseKnown = sess.syncedIn.has(localPath);
+    const editor = _daytonaEditorState(convId, root, localPath);
+    const localDirty = !!editor?.dirty || (localBaseKnown ? localFingerprint !== sess.syncedIn.get(localPath) : !!node);
+    if (node?.type === 'dir') protectedLocalDirs.add(localPath);
+    if (!remoteChanged) {
+      sess.syncedOut.set(remotePath, file.mtime || previousMtime || Date.now());
+      skipped++;
+      continue;
+    }
+    if (bytesPulled + (file.size || 0) > DAYTONA_SYNC_MAX_BYTES) {
+      warnings.push('Could not pull ' + localPath + ': download reached the 100 MiB safety limit.');
+      continue;
+    }
     try {
       const bytes = await daytonaClient.readFile(convId, remotePath, true);
-      const isText = _looksLikeText(bytes);
-      if (isText) {
-        const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-        vfsWrite(localPath, text);
-      } else {
-        await vfsWriteBinary(localPath, bytes);
+      if (bytesPulled + bytes.length > DAYTONA_SYNC_MAX_BYTES) {
+        warnings.push('Could not pull ' + localPath + ': download reached the 100 MiB safety limit.');
+        continue;
       }
-      sess.syncedOut.set(remotePath, f.mtime || Date.now());
-      // Keep the inbound fingerprint in sync so the next push doesn't re-upload
-      // a file we just pulled.
-      const node = vfsResolve(localPath);
-      if (node) sess.syncedIn.set(localPath, _vfsFingerprint(node));
+      if (node?.type === 'dir') {
+        const remoteCopy = _daytonaConflictPath(root, localPath, 'remote');
+        await _writeRemoteBytesToVfs(root, remoteCopy, bytes);
+        try {
+          await _daytonaSyncExec(convId, 'rm -f -- ' + _daytonaShellQuote(remotePath));
+          sess.syncedIn.delete(localPath);
+          sess.syncedOut.delete(remotePath);
+        } catch (deleteError) {
+          sess.syncedIn.set(localPath, sess.syncedIn.get(localPath) ?? null);
+          sess.syncedOut.set(remotePath, file.mtime || Date.now());
+          warnings.push('Could not remove the conflicting sandbox file ' + localPath + ': ' + (deleteError?.message || deleteError));
+        }
+        conflicts.push({ path: localPath, remoteCopy, typeConflict: true });
+        warnings.push('Type conflict at ' + localPath + ': kept the local directory and saved the sandbox file as ' + remoteCopy + '.');
+        changedPaths.push(remoteCopy);
+        bytesPulled += bytes.length;
+        pulled++;
+        continue;
+      }
+      if (localDirty) {
+        const conflictPath = await _preserveLocalConflict(root, localPath, node, editor);
+        conflicts.push({ path: localPath, localCopy: conflictPath });
+        warnings.push('Conflict at ' + localPath + ': kept the sandbox version at the original path'
+          + (conflictPath ? ' and saved the local version as ' + conflictPath + '.' : '.'));
+        if (conflictPath) changedPaths.push(conflictPath);
+      }
+      await _writeRemoteBytesToVfs(root, localPath, bytes);
+      const nextNode = vfsResolve(localPath, root);
+      sess.syncedIn.set(localPath, _vfsFingerprint(nextNode));
+      sess.syncedOut.set(remotePath, file.mtime || Date.now());
+      bytesPulled += bytes.length;
       pulled++;
-    } catch (e) { console.warn('syncOut skip', remotePath, e?.message || e); }
+      changedPaths.push(localPath);
+      if (editor?.editing) warnings.push('Remote update for open editor ' + localPath + ' is available; unsaved editor text was left untouched.');
+    } catch (e) { warnings.push('Could not pull ' + localPath + ': ' + (e?.message || e)); }
   }
-  // Forget remote files that disappeared, so a re-created file gets pulled.
-  for (const cached of [...sess.syncedOut.keys()]) {
-    if (!seen.has(cached)) sess.syncedOut.delete(cached);
+  if (!incomplete) {
+    for (const localPath of tracked) {
+      if (remoteFiles.has(localPath)) continue;
+      // ponytail: prefix scan is bounded by the 2,000-file sync cap; index paths if that cap grows.
+      const remotePath = DAYTONA_WORKSPACE + localPath;
+      if ([...protectedLocalDirs].some(path => localPath.startsWith(path + '/'))) {
+        sess.syncedIn.delete(localPath);
+        sess.syncedOut.delete(remotePath);
+        continue;
+      }
+      const remoteWasPresent = sess.syncedOut.has(remotePath)
+        ? sess.syncedOut.get(remotePath) != null
+        : sess.syncedIn.has(localPath) && sess.syncedIn.get(localPath) != null;
+      if (!remoteWasPresent) continue;
+      const node = vfsResolve(localPath, root);
+      const editor = _daytonaEditorState(convId, root, localPath);
+      const localBaseKnown = sess.syncedIn.has(localPath);
+      const localDirty = !!editor?.dirty || (localBaseKnown ? _vfsFingerprint(node) !== sess.syncedIn.get(localPath) : !!node);
+      try {
+        if (node?.type === 'dir') {
+          conflicts.push({ path: localPath, localDirectory: true, remoteDeleted: true });
+          warnings.push('The sandbox deleted tracked file ' + localPath + ', but the local path is now a directory; kept the directory.');
+          sess.syncedIn.delete(localPath);
+          sess.syncedOut.delete(remotePath);
+          continue;
+        }
+        if (localDirty) {
+          const conflictPath = await _preserveLocalConflict(root, localPath, node, editor);
+          conflicts.push({ path: localPath, localCopy: conflictPath, remoteDeleted: true });
+          warnings.push('Conflict at ' + localPath + ': the sandbox deleted it'
+            + (conflictPath ? '; saved the local version as ' + conflictPath + '.' : '.'));
+          if (conflictPath) changedPaths.push(conflictPath);
+        }
+        const currentNode = vfsResolve(localPath, root);
+        if (currentNode?.type === 'file') {
+          const result = vfsDelete(localPath, true, root);
+          if (result.error) throw new Error(result.error);
+          deletedPaths.push(localPath);
+        } else if (currentNode) {
+          warnings.push('Kept ' + localPath + ' because it changed from a file into a directory during sandbox sync.');
+        }
+        sess.syncedIn.delete(localPath);
+        sess.syncedOut.delete(remotePath);
+        if (editor?.editing) warnings.push('The sandbox deleted open editor ' + localPath + '; unsaved editor text was left untouched.');
+      } catch (e) { warnings.push('Could not apply sandbox deletion for ' + localPath + ': ' + (e?.message || e)); }
+    }
   }
-  return { pulled, skipped };
+  return { pulled, skipped, bytesPulled, warnings, conflicts, changedPaths, deletedPaths, incomplete };
 }
 
 function _looksLikeText(bytes) {
@@ -4139,28 +4340,46 @@ window.addEventListener('beforeunload', () => {
 });
 
 // ── Model list fetching ─────────────────────────────────────────
+let _settingsModelFetchSeq = 0;
+let _settingsModelFetchController = null;
+async function requestProviderModelList(provider, options = {}) {
+  const resp = await fetchWithRetry(buildProviderApiUrl('/v1/models', provider), {
+    headers: getProviderAuthHeaders({ provider, json: false }),
+    cache: 'no-store',
+    ...(options.signal ? { signal: options.signal } : {}),
+  }, { retries: options.retries ?? 0 });
+  if (!resp.ok) throw new Error('HTTP ' + resp.status);
+  const data = await resp.json();
+  let models = (Array.isArray(data?.data) ? data.data : [])
+    .map(m => typeof m?.id === 'string' ? m.id.trim() : '')
+    .filter(Boolean);
+  if (options.filterOpenAiChat && provider.type === 'openai_compat') {
+    models = models.filter(m => /gpt|o1|o3|o4|chatgpt|deepseek/i.test(m));
+  }
+  return [...new Set(models)].sort();
+}
+
 async function fetchModelList() {
-  const ep = (_keys?.api_endpoint || CFG.api_endpoint || '').replace(/\/+$/, '');
-  const url = ep + '/v1/models';
+  const provider = {
+    ...(ACTIVE_PROVIDER || {}),
+    type: PROVIDER,
+    endpoint: _keys?.api_endpoint || CFG.api_endpoint || '',
+    apiKey: _keys?.api_key || '',
+  };
   try {
-    const resp = await fetchWithRetry(url, { headers: getAuthHeaders() });
-    if (!resp.ok) return [];
-    const data = await resp.json();
-    let models = (data.data || []).map(m => m.id);
-    if (PROVIDER === 'openai_compat') models = models.filter(m => /gpt|o1|o3|o4|chatgpt|deepseek/i.test(m));
-    return models.sort();
+    return await requestProviderModelList(provider, { retries: 5, filterOpenAiChat: true });
   } catch { return []; }
 }
 
 function populateModelDropdown(models) {
   const sel = document.getElementById('modelSelect');
   if (!models.length) {
-    sel.innerHTML = `<option value="${API_MODEL}">${API_MODEL}</option>`;
+    sel.innerHTML = `<option value="${esc(API_MODEL)}">${esc(API_MODEL)}</option>`;
     return;
   }
   // Ensure current model is in the list
   if (!models.includes(API_MODEL)) models.unshift(API_MODEL);
-  sel.innerHTML = models.map(m => `<option value="${m}"${m === API_MODEL ? ' selected' : ''}>${m}</option>`).join('');
+  sel.innerHTML = models.map(m => `<option value="${esc(m)}"${m === API_MODEL ? ' selected' : ''}>${esc(m)}</option>`).join('');
 }
 
 // ── Streaming render throttle ───────────────────────────────────
@@ -6290,8 +6509,8 @@ async function _syncWebContainerToVfs(wc, entries, options = {}) {
   return { files: written, bytes: totalBytes };
 }
 
-function vfsStat(path) {
-  const node = vfsResolve(path);
+function vfsStat(path, root = vfs) {
+  const node = vfsResolve(path, root);
   if (!node) return null;
   if (node.type === 'dir') return { path: normPath(path), type: 'dir', size: 0, binary: false };
   const size = node.binary ? (node.size ?? (node.bytes ? node.bytes.length : 0)) : (node.content || '').length;
@@ -6300,9 +6519,9 @@ function vfsStat(path) {
 
 // Write binary bytes to the VFS. Bytes go to the content-addressed blob store;
 // the vfs node only carries {hash,size}. Async — callers must await.
-async function vfsWriteBinary(path, bytes, skipRender = false) {
+async function vfsWriteBinary(path, bytes, skipRender = false, root = vfs) {
   path = normPath(path);
-  const parts = path.slice(1).split('/'); const fn = parts.pop(); let n = vfs;
+  const parts = path.slice(1).split('/'); const fn = parts.pop(); let n = root;
   for (const p of parts) { if (!n.children[p]) n.children[p] = { type: 'dir', children: {} }; n = n.children[p]; }
   const existing = n.children[fn];
   const { hash, size } = await blobStore.put(bytes);
@@ -6321,13 +6540,13 @@ async function vfsWriteBinary(path, bytes, skipRender = false) {
     size,
     modified: Date.now(),
   };
-  if (!skipRender) renderFileTree();
+  if (!skipRender && root === vfs) renderFileTree();
   return { ok: true, path, bytes: size, hash };
 }
 
 // Fetch binary bytes for a path. Async — returns Uint8Array or null.
-async function vfsGetBinary(path) {
-  const node = vfsResolve(path);
+async function vfsGetBinary(path, root = vfs) {
+  const node = vfsResolve(path, root);
   if (!node || node.type !== 'file') return null;
   if (!node.binary) return null;
   // Preferred path: node carries a blob hash.
@@ -7434,29 +7653,78 @@ function _daytonaShellHint(combined) {
   if (!_DAYTONA_MISSING_SHELL_RE.test(combined)) return '';
   return 'Daytona sandbox cannot spawn its login shell — the snapshot is missing the required binary (commonly /usr/bin/zsh). Fix: open Settings → Code Sandbox and clear DAYTONA_IMAGE so Daytona falls back to its working built-in snapshot, or pin an image that ships the required shell. Original error follows:\n';
 }
+function _appendDaytonaSyncWarnings(output, warnings) {
+  const unique = [...new Set(warnings || [])];
+  return unique.length ? output + '\n[sandbox sync warnings]\n- ' + unique.join('\n- ') : output;
+}
+async function _refreshDaytonaSyncUi(convId, root, result) {
+  if (visibleConvId !== convId || vfs !== root || !result) return;
+  const changed = new Set(result.changedPaths || []);
+  const deleted = new Set(result.deletedPaths || []);
+  if (changed.size || deleted.size) renderFileTree();
+  const viewer = document.getElementById('fileViewer');
+  if (!viewer?.classList.contains('show')) return;
+  const path = normPath(document.getElementById('fvPath')?.textContent || '/');
+  if (!changed.has(path) && !deleted.has(path)) return;
+  const area = document.getElementById('feEditArea');
+  if (area) {
+    document.getElementById('fvRemoteSyncNotice')?.remove();
+    const notice = document.createElement('div');
+    notice.id = 'fvRemoteSyncNotice';
+    notice.style.cssText = 'padding:7px 10px;background:var(--warning-bg,#4a3300);color:var(--text-primary);font-size:11px';
+    notice.textContent = deleted.has(path)
+      ? 'The sandbox deleted this file. Your editor text is unchanged; save to recreate it or close without saving.'
+      : 'The sandbox has a newer version. Your editor text is unchanged; reopen the file to view the synced version.';
+    document.getElementById('fvContent')?.prepend(notice);
+  } else if (deleted.has(path)) {
+    closeFileViewer(true);
+  } else {
+    await openFileViewer(path);
+  }
+}
 async function _remoteWrap(input, exec) {
   const run = currentRunContext;
   const convId = run?.convId || activeConvId;
   if (!convId) return 'Error: no active conversation to bind a remote sandbox to.';
-  const t0 = Date.now();
-  try { await syncVfsToRemote(convId, input); if (run) activateConversationRun(run); } catch (e) { return 'Error (sandbox syncIn): ' + (e.message || e); }
+  const root = run?.state?.vfs || vfs;
+  const syncWarnings = [];
+  if (window._daytonaSessions[convId]) {
+    let before;
+    try { before = await syncVfsFromRemote(convId, root); }
+    catch (e) { return 'Error (sandbox pre-sync): ' + (e.message || e); }
+    syncWarnings.push(...before.warnings);
+    if (run) activateConversationRun(run);
+    await _refreshDaytonaSyncUi(convId, root, before);
+    if (before.incomplete) return _appendDaytonaSyncWarnings('Error (sandbox pre-sync): remote file state was incomplete; no local files were uploaded.', syncWarnings);
+  }
+  try {
+    const pushed = await syncVfsToRemote(convId, root);
+    syncWarnings.push(...pushed.warnings);
+    if (run) activateConversationRun(run);
+  } catch (e) { return 'Error (sandbox syncIn): ' + (e.message || e); }
   let res;
   try { res = await exec(convId); if (run) activateConversationRun(run); }
   catch (e) { return 'Error (sandbox exec): ' + (e.message || e); }
-  try { await syncVfsFromRemote(convId, t0 - 1000); if (run) activateConversationRun(run); } catch (e) { console.warn('syncOut failed:', e?.message || e); }
+  try {
+    const after = await syncVfsFromRemote(convId, root);
+    syncWarnings.push(...after.warnings);
+    if (run) activateConversationRun(run);
+    await _refreshDaytonaSyncUi(convId, root, after);
+  } catch (e) { syncWarnings.push('Could not sync sandbox changes back to VFS: ' + (e?.message || e)); }
   const { stdout = '', stderr = '', exitCode = 0, _raw = null } = res || {};
   const hint = _daytonaShellHint(stdout + '\n' + stderr);
+  const parts = [];
   if (exitCode && !stdout && !stderr) {
     let rawDump = '';
     try { rawDump = '\nraw response: ' + JSON.stringify(_raw).slice(0, 400); } catch {}
-    return (hint || '') + `Exit ${exitCode} (no stdout/stderr from Daytona — sandbox may still be warming up or the toolbox returned a bare error envelope).` + rawDump;
+    parts.push((hint || '') + `Exit ${exitCode} (no stdout/stderr from Daytona — sandbox may still be warming up or the toolbox returned a bare error envelope).` + rawDump);
+  } else {
+    if (hint) parts.push(hint);
+    if (stdout) parts.push(stdout);
+    if (stderr) parts.push((stdout ? '\n' : '') + 'stderr:\n' + stderr);
+    if (exitCode) parts.push(`\n[exit ${exitCode}]`);
   }
-  const parts = [];
-  if (hint) parts.push(hint);
-  if (stdout) parts.push(stdout);
-  if (stderr) parts.push((stdout ? '\n' : '') + 'stderr:\n' + stderr);
-  if (exitCode) parts.push(`\n[exit ${exitCode}]`);
-  return parts.join('') || '(no output)';
+  return _appendDaytonaSyncWarnings(parts.join('') || '(no output)', syncWarnings);
 }
 async function toolPythonExecRemote(input) {
   const code = input?.code || '';
@@ -9116,6 +9384,10 @@ function renderProviderProfilesInSettings() {
 }
 
 function _applyProviderProfileToSettingsModal(p) {
+  _settingsModelFetchSeq++;
+  _settingsModelFetchController?.abort();
+  _settingsModelFetchController = null;
+  document.getElementById('setAvailableModels').innerHTML = '';
   document.getElementById('setProviderName').value = p.name || '';
   document.getElementById('setProvider').value = p.type || 'openai_compat';
   document.getElementById('setEndpoint').value = (p.endpoint || '').replace(/\/+$/, '');
@@ -9369,30 +9641,29 @@ async function fetchModelsIntoSettings() {
   const provider = document.getElementById('setProvider').value.trim() || 'anthropic_compat';
   const endpoint = document.getElementById('setEndpoint').value.trim().replace(/\/+$/, '');
   const apiKey = document.getElementById('setApiKey').value.trim();
+  const seq = ++_settingsModelFetchSeq;
+  _settingsModelFetchController?.abort();
+  _settingsModelFetchController = null;
   if (!apiKey) { status.textContent = 'API key required to fetch models'; return; }
   if (!endpoint) { status.textContent = 'API endpoint required to fetch models'; return; }
+  const controller = new AbortController();
+  _settingsModelFetchController = controller;
   status.textContent = 'Fetching model list...';
   try {
-    const url = endpoint + '/v1/models';
-    const headers = {};
-    if (provider === 'anthropic_compat') {
-      headers['x-api-key'] = apiKey;
-      headers['anthropic-version'] = '2023-06-01';
-      headers['anthropic-dangerous-direct-browser-access'] = 'true';
-    } else {
-      headers['Authorization'] = 'Bearer ' + apiKey;
-    }
-    const resp = await fetch(url, { headers });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    const models = (data.data || []).map(m => m.id).sort();
+    const models = await requestProviderModelList({ type: provider, endpoint, apiKey }, { signal: controller.signal });
+    if (seq !== _settingsModelFetchSeq
+      || provider !== (document.getElementById('setProvider').value.trim() || 'anthropic_compat')
+      || endpoint !== document.getElementById('setEndpoint').value.trim().replace(/\/+$/, '')
+      || apiKey !== document.getElementById('setApiKey').value.trim()) return;
     if (!models.length) { status.textContent = 'No models returned'; return; }
     const sel = document.getElementById('setAvailableModels');
     const selected = new Set(getCurrentSelectedModels());
-    sel.innerHTML = models.map(m => `<option value="${m}"${selected.has(m) ? ' selected' : ''}>${m}</option>`).join('');
+    sel.innerHTML = models.map(m => `<option value="${esc(m)}"${selected.has(m) ? ' selected' : ''}>${esc(m)}</option>`).join('');
     status.textContent = `Fetched ${models.length} models — select one or more, then click "Add Selected"`;
   } catch (e) {
-    status.textContent = 'Fetch failed: ' + e.message;
+    if (seq === _settingsModelFetchSeq && !isAbortError(e)) status.textContent = 'Fetch failed: ' + e.message;
+  } finally {
+    if (_settingsModelFetchController === controller) _settingsModelFetchController = null;
   }
 }
 
@@ -11146,20 +11417,21 @@ function normPath(p) {
   for (const s of p.split('/')) { if (s === '..') { if (parts.length) parts.pop(); } else if (s && s !== '.') parts.push(s); }
   return '/' + parts.join('/');
 }
-function vfsResolve(path) {
-  path = normPath(path); if (path === '/') return vfs;
-  let n = vfs; for (const p of path.slice(1).split('/')) { if (!n || n.type !== 'dir' || !n.children[p]) return null; n = n.children[p]; } return n;
+function vfsResolve(path, root = vfs) {
+  path = normPath(path); if (path === '/') return root;
+  let n = root; for (const p of path.slice(1).split('/')) { if (!n || n.type !== 'dir' || !n.children[p]) return null; n = n.children[p]; } return n;
 }
-function vfsRead(path) { const n = vfsResolve(path); if (!n) return { error: `File not found: ${path}` }; if (n.type !== 'file') return { error: `Not a file: ${path}` }; return { content: n.content, path: normPath(path) }; }
-function vfsWrite(path, content, skipRender = false) {
-  path = normPath(path); const parts = path.slice(1).split('/'); const fn = parts.pop(); let n = vfs;
+function vfsRead(path, root = vfs) { const n = vfsResolve(path, root); if (!n) return { error: `File not found: ${path}` }; if (n.type !== 'file') return { error: `Not a file: ${path}` }; return { content: n.content, path: normPath(path) }; }
+function vfsWrite(path, content, skipRender = false, root = vfs) {
+  path = normPath(path); const parts = path.slice(1).split('/'); const fn = parts.pop(); let n = root;
   for (const p of parts) { if (!n.children[p]) n.children[p] = { type: 'dir', children: {} }; n = n.children[p]; if (n.type !== 'dir') return { error: `${p} is not a directory` }; }
-  n.children[fn] = { type: 'file', content, modified: Date.now() }; if (!skipRender) renderFileTree(); return { ok: true, path, bytes: content.length };
+  if (n.children[fn]?.binary) _unrefVfsSubtree(n.children[fn]);
+  n.children[fn] = { type: 'file', content, modified: Date.now() }; if (!skipRender && root === vfs) renderFileTree(); return { ok: true, path, bytes: content.length };
 }
-function vfsDelete(path) { path = normPath(path); if (path === '/') return { error: 'Cannot delete root' }; const parts = path.slice(1).split('/'); const nm = parts.pop(); let n = vfs; for (const p of parts) { if (!n.children[p]) return { error: `Not found: ${path}` }; n = n.children[p]; } if (!n.children[nm]) return { error: `Not found: ${path}` }; _unrefVfsSubtree(n.children[nm]); delete n.children[nm]; renderFileTree(); return { ok: true }; }
+function vfsDelete(path, skipRender = false, root = vfs) { path = normPath(path); if (path === '/') return { error: 'Cannot delete root' }; const parts = path.slice(1).split('/'); const nm = parts.pop(); let n = root; for (const p of parts) { if (!n.children[p]) return { error: `Not found: ${path}` }; n = n.children[p]; } if (!n.children[nm]) return { error: `Not found: ${path}` }; _unrefVfsSubtree(n.children[nm]); delete n.children[nm]; if (!skipRender && root === vfs) renderFileTree(); return { ok: true }; }
 function vfsMkdir(path) { path = normPath(path); const parts = path.slice(1).split('/'); let n = vfs; for (const p of parts) { if (!n.children[p]) n.children[p] = { type: 'dir', children: {} }; n = n.children[p]; } renderFileTree(); return { ok: true }; }
-function vfsWalk(basePath, cb) {
-  basePath = normPath(basePath || '/'); const n = vfsResolve(basePath); if (!n) return;
+function vfsWalk(basePath, cb, root = vfs) {
+  basePath = normPath(basePath || '/'); const n = vfsResolve(basePath, root); if (!n) return;
   (function walk(nd, p) { if (nd.type === 'file') cb(p, nd); else if (nd.children) for (const [nm, ch] of Object.entries(nd.children).sort((a,b) => a[0].localeCompare(b[0]))) walk(ch, p === '/' ? '/' + nm : p + '/' + nm); })(n, basePath);
 }
 function globMatch(pat, path) { const r = pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\0').replace(/\*/g, '[^/]*').replace(/\0/g, '.*').replace(/\?/g, '[^/]'); return new RegExp('^' + r + '$').test(path); }
@@ -13812,11 +14084,11 @@ function _remoteToolFilePaths(filePath) {
   return { raw, vfsPath, remotePath: DAYTONA_WORKSPACE + (vfsPath === '/' ? '' : vfsPath) };
 }
 
-function _rememberRemoteShadow(convId, vfsPath) {
+function _rememberRemoteShadow(convId, vfsPath, root = vfs) {
   const sess = window._daytonaSessions?.[convId];
   if (!sess || !vfsPath || vfsPath === '/') return;
   if (!sess.syncedIn) sess.syncedIn = new Map();
-  const node = vfsResolve(vfsPath);
+  const node = vfsResolve(vfsPath, root);
   if (node?.type === 'file') sess.syncedIn.set(vfsPath, _vfsFingerprint(node));
 }
 
@@ -13828,27 +14100,27 @@ function _formatReadText(text, input) {
   return lines.map((l, i) => `${String(off + i + 1).padStart(5)}\t${l}`).join('\n');
 }
 
-function _readVfsForTool(input, filePath) {
-  const stat = vfsStat(filePath);
+function _readVfsForTool(input, filePath, root = vfs) {
+  const stat = vfsStat(filePath, root);
   if (!stat) return { ok: false, output: `File not found: ${filePath}` };
   if (stat.type !== 'file') return { ok: false, output: `Not a file: ${filePath}` };
   if (stat.binary) return { ok: true, output: `[Binary file: ${stat.path}, ${stat.size} bytes]`, binary: true };
-  const r = vfsRead(filePath);
+  const r = vfsRead(filePath, root);
   if (r.error) return { ok: false, output: r.error };
   return { ok: true, output: _formatReadText(r.content, input), text: r.content };
 }
 
-async function _copyVfsFileToRemote(convId, paths) {
-  const node = vfsResolve(paths.vfsPath);
+async function _copyVfsFileToRemote(convId, paths, root = vfs) {
+  const node = vfsResolve(paths.vfsPath, root);
   if (!node || node.type !== 'file') return false;
   if (node.binary) {
-    const bytes = await vfsGetBinary(paths.vfsPath);
+    const bytes = await vfsGetBinary(paths.vfsPath, root);
     if (!bytes) return false;
     await daytonaClient.writeFile(convId, paths.remotePath, bytes);
   } else {
     await daytonaClient.writeFile(convId, paths.remotePath, node.content || '');
   }
-  _rememberRemoteShadow(convId, paths.vfsPath);
+  _rememberRemoteShadow(convId, paths.vfsPath, root);
   return true;
 }
 
@@ -13857,56 +14129,64 @@ async function _copyVfsFileToRemote(convId, paths) {
 // the sandbox is not older than the VFS at read time — otherwise a stale
 // sandbox copy would silently overwrite a fresher VFS edit (e.g. the user
 // just typed into the editor) when the result is shadowed back.
-async function _pushVfsToSandboxIfDirty(convId, paths) {
+async function _pushVfsToSandboxIfDirty(convId, paths, root = vfs) {
   const sess = window._daytonaSessions?.[convId];
   if (!sess || !paths?.vfsPath || paths.vfsPath === '/') return false;
   if (!sess.syncedIn) sess.syncedIn = new Map();
-  const node = vfsResolve(paths.vfsPath);
+  const node = vfsResolve(paths.vfsPath, root);
   if (!node || node.type !== 'file') return false;
   if (sess.syncedIn.get(paths.vfsPath) === _vfsFingerprint(node)) return false;
-  try {
-    return await _copyVfsFileToRemote(convId, paths);
-  } catch (e) {
-    console.warn('pre-push to sandbox skipped', paths.vfsPath, e?.message || e);
-    return false;
-  }
+  return _copyVfsFileToRemote(convId, paths, root);
 }
 
-async function _shadowRemoteBytes(convId, paths, bytes) {
+async function _shadowRemoteBytes(convId, paths, bytes, root = vfs) {
   if (!paths.vfsPath || paths.vfsPath === '/') return;
-  if (_looksLikeText(bytes)) {
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    vfsWrite(paths.vfsPath, text);
-  } else {
-    await vfsWriteBinary(paths.vfsPath, bytes);
-  }
-  _rememberRemoteShadow(convId, paths.vfsPath);
+  await _writeRemoteBytesToVfs(root, paths.vfsPath, bytes);
+  if (root === vfs) renderFileTree();
+  _rememberRemoteShadow(convId, paths.vfsPath, root);
+}
+
+async function _reconcileBeforeRemoteFileTool(convId, root, run) {
+  if (!window._daytonaSessions?.[convId]) return [];
+  const result = await syncVfsFromRemote(convId, root);
+  if (run) activateConversationRun(run);
+  await _refreshDaytonaSyncUi(convId, root, result);
+  if (result.incomplete) throw new Error('remote file state was incomplete; no local file was uploaded. ' + result.warnings.join(' '));
+  return result.warnings;
 }
 
 async function toolReadRemote(input) {
   const run = currentRunContext;
   const convId = run?.convId || activeConvId;
   if (!convId) return 'Error: no active conversation to bind a remote sandbox to.';
+  const root = run?.state?.vfs || vfs;
   const fp = input?.file_path || '';
   if (!String(fp).trim()) return 'Error: file_path is required.';
   const paths = _remoteToolFilePaths(fp);
-  await _pushVfsToSandboxIfDirty(convId, paths);
+  const syncWarnings = [];
+  const finish = output => _appendDaytonaSyncWarnings(output, syncWarnings);
+  try {
+    syncWarnings.push(...await _reconcileBeforeRemoteFileTool(convId, root, run));
+    await _pushVfsToSandboxIfDirty(convId, paths, root);
+  }
+  catch (e) { return finish(`Error (sandbox pre-sync ${paths.remotePath}): ${e?.message || e}`); }
   if (run) activateConversationRun(run);
   try {
     const bytes = await daytonaClient.readFile(convId, paths.remotePath, true);
     if (run) activateConversationRun(run);
-    await _shadowRemoteBytes(convId, paths, bytes);
-    if (!_looksLikeText(bytes)) return `[Binary file: ${paths.vfsPath}, ${bytes.length} bytes]`;
+    await _shadowRemoteBytes(convId, paths, bytes, root);
+    if (!_looksLikeText(bytes)) return finish(`[Binary file: ${paths.vfsPath}, ${bytes.length} bytes]`);
     const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    return _formatReadText(text, input);
+    return finish(_formatReadText(text, input));
   } catch (e) {
     if (run) activateConversationRun(run);
-    const local = _readVfsForTool(input, paths.vfsPath);
+    const local = _readVfsForTool(input, paths.vfsPath, root);
     if (local.ok) {
-      try { await _copyVfsFileToRemote(convId, paths); } catch {}
-      return local.output;
+      try { await _copyVfsFileToRemote(convId, paths, root); }
+      catch (copyError) { syncWarnings.push('Could not restore ' + paths.vfsPath + ' to the sandbox: ' + (copyError?.message || copyError)); }
+      return finish(local.output);
     }
-    return `File not found in sandbox or VFS: ${fp}\nSandbox path: ${paths.remotePath}\nSandbox error: ${e?.message || e}`;
+    return finish(`File not found in sandbox or VFS: ${fp}\nSandbox path: ${paths.remotePath}\nSandbox error: ${e?.message || e}`);
   }
 }
 
@@ -13914,6 +14194,7 @@ async function toolWriteRemote(input) {
   const run = currentRunContext;
   const convId = run?.convId || activeConvId;
   if (!convId) return 'Error: no active conversation to bind a remote sandbox to.';
+  const root = run?.state?.vfs || vfs;
   if (!String(input?.file_path || '').trim()) return 'Error: file_path is required.';
   const paths = _remoteToolFilePaths(input?.file_path || '');
   const content = String(input?.content ?? '');
@@ -13923,9 +14204,9 @@ async function toolWriteRemote(input) {
   } catch (e) {
     return `Error (sandbox Write ${paths.remotePath}): ${e?.message || e}`;
   }
-  const r = vfsWrite(paths.vfsPath, content);
+  const r = vfsWrite(paths.vfsPath, content, false, root);
   if (r.error) return r.error;
-  _rememberRemoteShadow(convId, paths.vfsPath);
+  _rememberRemoteShadow(convId, paths.vfsPath, root);
   return `File created in sandbox at: ${paths.remotePath} (VFS shadow: ${r.path}, ${r.bytes} bytes)`;
 }
 
@@ -13933,38 +14214,45 @@ async function toolEditRemote(input) {
   const run = currentRunContext;
   const convId = run?.convId || activeConvId;
   if (!convId) return 'Error: no active conversation to bind a remote sandbox to.';
+  const root = run?.state?.vfs || vfs;
   if (!String(input?.file_path || '').trim()) return 'Error: file_path is required.';
   const paths = _remoteToolFilePaths(input?.file_path || '');
   const oldStr = String(input?.old_str ?? '');
   const newStr = String(input?.new_str ?? '');
   if (!oldStr) return 'Error: old_str is required.';
-  await _pushVfsToSandboxIfDirty(convId, paths);
+  const syncWarnings = [];
+  const finish = output => _appendDaytonaSyncWarnings(output, syncWarnings);
+  try {
+    syncWarnings.push(...await _reconcileBeforeRemoteFileTool(convId, root, run));
+    await _pushVfsToSandboxIfDirty(convId, paths, root);
+  }
+  catch (e) { return finish(`Error (sandbox pre-sync ${paths.remotePath}): ${e?.message || e}`); }
   if (run) activateConversationRun(run);
   let content = '';
   try {
     const bytes = await daytonaClient.readFile(convId, paths.remotePath, true);
     if (run) activateConversationRun(run);
-    if (!_looksLikeText(bytes)) return `Error: cannot edit binary file in sandbox: ${paths.remotePath}`;
+    if (!_looksLikeText(bytes)) return finish(`Error: cannot edit binary file in sandbox: ${paths.remotePath}`);
     content = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   } catch (e) {
     if (run) activateConversationRun(run);
-    const local = vfsRead(paths.vfsPath);
-    if (local.error) return `Error: file not found in sandbox or VFS: ${paths.raw || input?.file_path || ''}\nSandbox path: ${paths.remotePath}\nSandbox error: ${e?.message || e}`;
+    const local = vfsRead(paths.vfsPath, root);
+    if (local.error) return finish(`Error: file not found in sandbox or VFS: ${paths.raw || input?.file_path || ''}\nSandbox path: ${paths.remotePath}\nSandbox error: ${e?.message || e}`);
     content = local.content || '';
   }
   const c = content.split(oldStr).length - 1;
-  if (c === 0) return `Error: old_str not found in ${paths.remotePath}`;
-  if (c > 1) return `Error: old_str matches ${c} locations in ${paths.remotePath}. Make it more specific.`;
+  if (c === 0) return finish(`Error: old_str not found in ${paths.remotePath}`);
+  if (c > 1) return finish(`Error: old_str matches ${c} locations in ${paths.remotePath}. Make it more specific.`);
   const next = content.replace(oldStr, newStr);
   try {
     await daytonaClient.writeFile(convId, paths.remotePath, next);
     if (run) activateConversationRun(run);
   } catch (e) {
-    return `Error (sandbox Edit ${paths.remotePath}): ${e?.message || e}`;
+    return finish(`Error (sandbox Edit ${paths.remotePath}): ${e?.message || e}`);
   }
-  vfsWrite(paths.vfsPath, next);
-  _rememberRemoteShadow(convId, paths.vfsPath);
-  return `Successfully edited sandbox file ${paths.remotePath} (VFS shadow: ${paths.vfsPath})`;
+  vfsWrite(paths.vfsPath, next, false, root);
+  _rememberRemoteShadow(convId, paths.vfsPath, root);
+  return finish(`Successfully edited sandbox file ${paths.remotePath} (VFS shadow: ${paths.vfsPath})`);
 }
 
 async function toolRead(input) {
@@ -15710,7 +15998,7 @@ async function collectRequestContextParts(messages = buildConversationFromEntrie
   const pyodideNativePrompt = getPyodideNativeToolPrompt();
   const planPrompt = planMode ? '\n\n[PLAN MODE ACTIVE]\nYou must not execute write-class tools (Write, Edit, Bash, PythonExec, VfsToPyodide, PyodideToVfs, JSExec, NodeExec, MCP tools, or SkillManager write actions). You may use read-only tools (Read, Glob, Grep, WebSearch, Fetch), SkillManager list/inspect, and TodoWrite to investigate. When your plan is complete, call the ExitPlanMode tool with the full plan as Markdown and wait for the user\'s approval. Do not proceed with execution until ExitPlanMode returns an approval message.' : '';
   const ralphPrompt = getRalphLoopPrompt();
-  const sandboxPrompt = isRemoteSandbox() ? '\n\n[REMOTE SANDBOX]\nA real Linux container (Daytona) is attached. Your execution surface in this mode:\n- **Bash** is the ONLY code-execution tool. Run interpreters from the shell: `python3 script.py`, `python3 -c "..."`, `node script.js`, `pip install ...`, `npm install ...`. Pip/npm installs and /home/daytona changes persist across Bash calls within this conversation.\n- **Read / Write / Edit** target the Daytona filesystem first. You may pass either VFS-style `/foo/bar.py` or sandbox absolute `/home/daytona/foo/bar.py`; both refer to `/home/daytona/foo/bar.py`. Do not build paths like `/home/daytona/home/daytona/...`. Successful reads/writes/edits update the browser VFS shadow at `/foo/bar.py`.\n- **Glob / Grep** search the browser VFS shadow. Use Bash for live sandbox `find`/`grep` when you need the current container filesystem.\n- Before every Bash call, the VFS shadow is uploaded to /home/daytona so files are available in the sandbox. After Bash returns, only files under /home/daytona/outputs are pulled back into the VFS as /outputs; other sandbox changes remain remote. In Bash, write final result files, reports, exports, generated media, and artifacts under /home/daytona/outputs (or relative outputs/ from cwd) so the user can inspect or download them.\n- **PythonExec / JSExec / NodeExec / VfsToPyodide / PyodideToVfs are DISABLED.** Do not mention them in tool lists or attempt to call them — they are intentionally hidden because the sandbox is a full Linux container and Bash covers every case.\n- cwd for Bash defaults to /home/daytona. Do NOT pass cwd=/workspace — that directory does not exist in the Daytona default snapshot and the daemon will silently return exit -1 with an empty body.\nWhen the user asks "what tools do you have", list ONLY the tools that are actually exposed in this request — do not enumerate disabled tools.' : '';
+  const sandboxPrompt = isRemoteSandbox() ? '\n\n[REMOTE SANDBOX]\nA real Linux container (Daytona) is attached. Your execution surface in this mode:\n- **Bash** is the ONLY code-execution tool. Run interpreters from the shell: `python3 script.py`, `python3 -c "..."`, `node script.js`, `pip install ...`, `npm install ...`. Pip/npm installs and /home/daytona changes persist across Bash calls within this conversation.\n- **Read / Write / Edit** target the Daytona filesystem first. You may pass either VFS-style `/foo/bar.py` or sandbox absolute `/home/daytona/foo/bar.py`; both refer to `/home/daytona/foo/bar.py`. Do not build paths like `/home/daytona/home/daytona/...`. Successful reads/writes/edits update the browser VFS shadow at `/foo/bar.py`.\n- **Glob / Grep** search the browser VFS shadow. Use Bash for live sandbox `find`/`grep` when you need the current container filesystem.\n- Before every Bash call, the VFS shadow is uploaded to /home/daytona so files are available in the sandbox. After Bash returns, files already mirrored from VFS are reconciled in both directions; new sandbox files are imported only from /home/daytona/outputs, while other new sandbox files stay remote. In Bash, write final result files, reports, exports, generated media, and artifacts under /home/daytona/outputs (or relative outputs/ from cwd) so the user can inspect or download them.\n- **PythonExec / JSExec / NodeExec / VfsToPyodide / PyodideToVfs are DISABLED.** Do not mention them in tool lists or attempt to call them — they are intentionally hidden because the sandbox is a full Linux container and Bash covers every case.\n- cwd for Bash defaults to /home/daytona. Do NOT pass cwd=/workspace — that directory does not exist in the Daytona default snapshot and the daemon will silently return exit -1 with an empty body.\nWhen the user asks "what tools do you have", list ONLY the tools that are actually exposed in this request — do not enumerate disabled tools.' : '';
   const memPrompt = await getCachedMemRecallForPrompt(projectedMessagesBase, { readOnly: !!options.readOnlyMemory, memoryRecallKey: options.memoryRecallKey });
   if (run) activateConversationRun(run);
   rebuildToolDefs(headId, { skipRender: !!options.skipToolRender });

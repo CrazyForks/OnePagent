@@ -1,12 +1,12 @@
 /* OnePagent service worker
  * Strategy:
  *   - HTML navigations: network-first (fall back to cached shell when offline).
- *   - Same-origin static assets (logo, manifest): stale-while-revalidate.
- *   - Cross-origin GETs (CDN libs): cache-first (opaque responses ok).
- *   - Anything else (POST, auth, model APIs): pass through untouched.
+ *   - Explicit app-shell assets: stale-while-revalidate.
+ *   - Explicit CDN assets: cache-first (opaque responses ok).
+ *   - Anything else (APIs, auth, no-store, POST): pass through untouched.
  * Bump CACHE_VERSION whenever the app shell changes to evict old caches.
  */
-const CACHE_VERSION = 'v2';
+const CACHE_VERSION = 'v3';
 const CACHE_NAME = `onepagent-${CACHE_VERSION}`;
 
 const APP_SHELL = [
@@ -26,6 +26,8 @@ const APP_SHELL = [
 const CDN_PREFETCH = [
   'https://cdn.bootcdn.net/ajax/libs/marked/11.1.1/marked.min.js',
 ];
+const APP_SHELL_URLS = new Set(APP_SHELL.map((path) => new URL(path, self.location.href).href));
+const CDN_URLS = new Set(CDN_PREFETCH);
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
@@ -44,7 +46,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.map((k) => k === CACHE_NAME ? null : caches.delete(k)));
+    await Promise.all(keys.map((k) => k !== CACHE_NAME && k.startsWith('onepagent-') ? caches.delete(k) : null));
     if (self.registration.navigationPreload) {
       try { await self.registration.navigationPreload.enable(); } catch (_) {}
     }
@@ -62,18 +64,19 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(req.url);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+  if (req.cache === 'no-store' || req.headers.has('authorization') || req.headers.has('x-api-key')) return;
 
   if (req.mode === 'navigate' || (req.headers.get('accept') || '').includes('text/html')) {
     event.respondWith(networkFirstHTML(event));
     return;
   }
 
-  if (url.origin === self.location.origin) {
+  if (APP_SHELL_URLS.has(url.href)) {
     event.respondWith(staleWhileRevalidate(req));
     return;
   }
 
-  event.respondWith(cacheFirst(req));
+  if (CDN_URLS.has(url.href)) event.respondWith(cacheFirst(req));
 });
 
 async function networkFirstHTML(event) {
