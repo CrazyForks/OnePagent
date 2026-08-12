@@ -83,6 +83,31 @@ async function testServiceWorkerBoundary() {
   assert.ok(dispatch(new Request('https://cdn.bootcdn.net/ajax/libs/marked/11.1.1/marked.min.js')));
 }
 
+function testReasoningToolHistoryWithoutReasoningContent() {
+  const context = {
+    PROVIDER: 'openai_compat',
+    API_MODEL: 'deepseek-reasoner',
+    shouldKeepReasoningForModel: () => true,
+    buildOpenAIUserContent: () => '',
+    applyThinkingToRequestBody: body => body,
+  };
+  vm.createContext(context);
+  vm.runInContext(slice('function assembleRequestBodyFromParts', 'function estimateContextPartTokens'), context);
+  const body = context.assembleRequestBodyFromParts({
+    systemPrompt: '',
+    openaiTools: [],
+    projectedMessages: [
+      { role: 'user', content: 'build it' },
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'Bash', input: { command: 'python3 build.py' } }] },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'WROTE output.html' }] },
+    ],
+  });
+  assert.equal(body.messages[2].role, 'assistant');
+  assert.equal(body.messages[2].tool_calls[0].id, 'call_1');
+  assert.equal(body.messages[3].role, 'tool');
+  assert.equal(body.messages[3].content, 'WROTE output.html');
+}
+
 async function testDaytonaReconcile() {
   const remoteWrap = slice('async function _remoteWrap', 'function _parseBoxLine');
   assert.ok(remoteWrap.indexOf('if (before.incomplete)') < remoteWrap.indexOf('syncVfsToRemote'));
@@ -275,6 +300,6 @@ async function testDaytonaReconcile() {
   assert.equal(resolve('/outputs/new.txt', owner).content, 'x');
 }
 
-Promise.all([testModelFetch(), testServiceWorkerBoundary(), testDaytonaReconcile()])
+Promise.all([testModelFetch(), testServiceWorkerBoundary(), testDaytonaReconcile(), testReasoningToolHistoryWithoutReasoningContent()])
   .then(() => console.log('regressions: ok'))
   .catch((error) => { console.error(error); process.exitCode = 1; });

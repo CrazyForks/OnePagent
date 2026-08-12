@@ -16074,14 +16074,12 @@ function assembleRequestBodyFromParts(parts, options = {}) {
   }
   const oai = [{ role: 'system', content: parts.systemPrompt }];
   const keepReasoning = shouldKeepReasoningForModel(requestModel);
-  const skippedToolResultIds = new Set();
   for (const m of parts.projectedMessages) {
     if (m.role === 'user') {
       if (Array.isArray(m.content)) {
         const userContent = buildOpenAIUserContent(m.content);
         for (const b of m.content) {
           if (b.type === 'tool_result') {
-            if (keepReasoning && skippedToolResultIds.has(b.tool_use_id)) continue;
             oai.push({ role: 'tool', tool_call_id: b.tool_use_id, content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content) });
           }
         }
@@ -16096,8 +16094,7 @@ function assembleRequestBodyFromParts(parts, options = {}) {
           else if (keepReasoning && b.type === 'reasoning') reasoning += b.reasoning_content || b.text || '';
           else if (b.type === 'tool_use') tc.push({ id: b.id, type: 'function', function: { name: b.name, arguments: JSON.stringify(b.input) } });
         }
-        if (keepReasoning && !reasoning) {
-          for (const call of tc) skippedToolResultIds.add(call.id);
+        if (keepReasoning && !reasoning && !tc.length) {
           if (t.trim()) oai.push({ role: 'user', content: `[Previous assistant response]\n${t}` });
           continue;
         }
