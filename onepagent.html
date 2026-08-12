@@ -5601,6 +5601,8 @@ async function saveConversationState(convId, state, options = {}) {
     lastCacheReadTokens: state.lastCacheReadTokens || 0,
     lastCacheWriteTokens: state.lastCacheWriteTokens || 0,
     lastTurnTokens: state.lastTurnTokens || 0,
+    planMode: !!state.planMode,
+    ralphModeEnabled: !!state.ralphModeEnabled,
     swarmAgentRoles
   });
   if (options.andRenderList) renderConvList();
@@ -5667,8 +5669,15 @@ function newConversation(skipSave, folderId) {
   currentViewFile = null;
   todos = [];
   subAgentRuns = [];
+  planMode = false;
+  ralphModeEnabled = getRalphSettings().enabled;
+  ralphRun = null;
+  swarmRunActive = null;
   if (typeof renderTodos === 'function') renderTodos();
   if (typeof renderSubAgents === 'function') renderSubAgents();
+  if (typeof renderPlanButton === 'function') renderPlanButton();
+  if (typeof renderRalphButton === 'function') renderRalphButton();
+  if (typeof rebuildToolDefs === 'function') rebuildToolDefs();
   chatEl.innerHTML = '<div class="msg msg-system msg-placeholder"><div class="msg-body">New conversation. Upload files and type a task to begin.</div></div>';
   visibleConversationState = captureConversationState(chatEl.innerHTML);
   // Remount active skills
@@ -5718,6 +5727,9 @@ async function switchConversation(id, skipSave) {
     updateMemoryUI();
     renderTodos();
     renderSubAgents();
+    renderPlanButton();
+    renderRalphButton();
+    rebuildToolDefs();
     closeFileViewer(true);
     syncLegacyRunFlags();
     updateButtons();
@@ -5756,6 +5768,10 @@ async function switchConversation(id, skipSave) {
   currentViewFile = null;
   todos = Array.isArray(data?.todos) ? data.todos : [];
   subAgentRuns = Array.isArray(data?.subAgentRuns) ? data.subAgentRuns : [];
+  planMode = !!data?.planMode;
+  ralphModeEnabled = data?.ralphModeEnabled ?? getRalphSettings().enabled;
+  ralphRun = null;
+  swarmRunActive = null;
   // v4: agent-tier roles per-conversation. Memory-only and global-persist modes are unaffected here.
   if (swarmSettings.agentRolesPersist && swarmSettings.agentRolesPerConv) {
     agentSwarmRoles = Array.isArray(data?.swarmAgentRoles) ? data.swarmAgentRoles : [];
@@ -5765,6 +5781,8 @@ async function switchConversation(id, skipSave) {
   }
   if (typeof renderTodos === 'function') renderTodos();
   if (typeof renderSubAgents === 'function') renderSubAgents();
+  if (typeof renderPlanButton === 'function') renderPlanButton();
+  if (typeof renderRalphButton === 'function') renderRalphButton();
   if (typeof renderSwarmRoles === 'function') renderSwarmRoles();
   if (typeof rebuildToolDefs === 'function') rebuildToolDefs();
   if (data?.chatHTML) chatEl.innerHTML = data.chatHTML;
@@ -6179,6 +6197,7 @@ function resetConversationContext() {
   lastContextBreakdown = null;
   lastTurnTokens = 0;
   contextBreakdownExpanded = false;
+  if (typeof rebuildToolDefs === 'function') rebuildToolDefs();
   updateMemoryUI();
   document.getElementById('memoryLog').innerHTML = '';
   appendSystemMsg('Context reset. Previous messages remain visible but will be excluded from future model context.');
@@ -6205,6 +6224,7 @@ function clearConversation() {
   chatEl.innerHTML = '<div class="msg msg-system msg-placeholder"><div class="msg-body">Conversation cleared. Type a task to begin.</div></div>';
   todos = [];
   if (typeof renderTodos === 'function') renderTodos();
+  if (typeof rebuildToolDefs === 'function') rebuildToolDefs();
   updateMemoryUI();
   document.getElementById('memoryLog').innerHTML = '';
   saveCurrentConv(true);
@@ -11090,14 +11110,17 @@ function schedulePush() {
 // PLAN MODE — writes blocked; model plans first, user approves via ExitPlanMode
 // ═══════════════════════════════════════════════════════════════════
 function togglePlanMode() {
+  ensureVisibleConversationStateActive();
+  const run = getActiveConversationRun();
   planMode = !planMode;
   renderPlanButton();
   rebuildToolDefs();
   appendSystemMsg(planMode
     ? 'Plan Mode ON — write tools blocked. The agent should explore, then call ExitPlanMode with a plan for your approval.'
-    : 'Plan Mode OFF — all tools available.');
+    : 'Plan Mode OFF — all tools available.', run);
 }
 function renderPlanButton() {
+  if (currentRunContext && !isRunVisible(currentRunContext)) return;
   const btn = document.getElementById('planBtn');
   if (!btn) return;
   if (planMode) {
@@ -11111,6 +11134,7 @@ function renderPlanButton() {
   }
 }
 function toggleRalphMode() {
+  ensureVisibleConversationStateActive();
   if (isConversationRunning(visibleConvId || activeConvId)) return;
   ralphModeEnabled = !ralphModeEnabled;
   renderRalphButton();
@@ -11182,6 +11206,7 @@ function appendRalphContinuationMessage({ ralphRun, lastAssistantText }) {
 
 let _planModalResolver = null;
 function showPlanApprovalModal(plan) {
+  if (_planModalResolver) return Promise.resolve({ approved: false, feedback: 'Another conversation is already awaiting plan review.' });
   return new Promise(resolve => {
     _planModalResolver = resolve;
     const overlay = document.getElementById('planModal');
@@ -11230,6 +11255,7 @@ function _normalizeHitlInput(input) {
 
 function showHitlModal(input) {
   const state = _normalizeHitlInput(input);
+  if (_hitlModalResolver) return Promise.resolve({ status: 'busy', mode: state.mode, answer: '', reason: 'Another conversation is already awaiting user input.' });
   return new Promise(resolve => {
     _hitlModalResolver = resolve;
     _hitlModalState = state;
@@ -12869,6 +12895,7 @@ let _editingSwarmRoleId = null;
 let _swarmRoleModalIsCreate = false;
 
 function renderSwarmRoles() {
+  if (currentRunContext && !isRunVisible(currentRunContext)) return;
   const el = document.getElementById('swarmRolesList');
   if (!el) return;
   const all = getAllSwarmRoles().concat(
@@ -13191,9 +13218,10 @@ function importSwarmRolesJsonPrompt() {
 }
 
 function toggleToolEnabled(name) {
+  ensureVisibleConversationStateActive();
   if (disabledTools.has(name)) disabledTools.delete(name); else disabledTools.add(name);
   try { localStorage.setItem('ba_disabled_tools', JSON.stringify([...disabledTools])); } catch {}
-  renderToolsGrid();
+  rebuildToolDefs();
 }
 function getEnabledToolsAnthropic() { return allToolsAnthropic.filter(t => !disabledTools.has(t.name)); }
 function getEnabledToolsOpenAI() { return allToolsOpenAI.filter(t => !disabledTools.has(t.function.name)); }
@@ -13244,12 +13272,13 @@ function isToolVisibleInUi(toolName) {
 }
 
 function renderToolsGrid() {
+  if (currentRunContext && !isRunVisible(currentRunContext)) return;
   const icons = { Read: 'i:book', Write: 'i:file-pen', Edit: 'i:pencil', Glob: 'i:search', Grep: 'i:search', Bash: 'i:terminal', PythonExec: 'i:terminal', VfsToPyodide: 'i:terminal', PyodideToVfs: 'i:terminal', JSExec: 'i:terminal', NodeExec: 'i:terminal', WebSearch: 'i:globe', Fetch: 'i:antenna', RunSubAgent: 'i:bolt', SwarmSpawn: 'i:bolt', SwarmStatus: 'i:bolt', SwarmAbort: 'i:x', SwarmHandoff: 'i:bolt', bb_write: 'i:pencil', bb_read: 'i:book', bb_list: 'i:file-text', bb_post_task: 'i:plus', bb_claim: 'i:check', GenerateImage: 'i:image', GenerateVideo: 'i:film', SkillManager: 'i:wrench', AskUser: 'i:message-circle' };
   const el = document.getElementById('toolsGrid');
   el.innerHTML = allToolsAnthropic.filter(t => isToolVisibleInUi(t.name)).map(t => {
     const ic = icons[t.name] || 'i:wrench';
     const enabled = !disabledTools.has(t.name);
-    return `<div class="tg-card ${enabled ? 'enabled' : ''}" data-tool="${esc(t.name)}" title="${esc(t.description)}" onclick="toggleToolEnabled('${esc(t.name)}')" style="${enabled ? '' : 'opacity:0.4'}"><div class="tg-badge"></div><div class="tg-icon">${iconHtml(ic)}</div><div class="tg-name">${esc(t.name)}</div></div>`;
+    return `<div class="tg-card ${enabled ? 'enabled' : ''}" data-tool="${esc(t.name)}" title="${esc(t.description)}" onclick="toggleToolEnabled(this.dataset.tool)" style="${enabled ? '' : 'opacity:0.4'}"><div class="tg-badge"></div><div class="tg-icon">${iconHtml(ic)}</div><div class="tg-name">${esc(t.name)}</div></div>`;
   }).join('');
 }
 
@@ -13260,7 +13289,11 @@ function renderToolsGrid() {
 const PLAN_MODE_WRITE_TOOLS = new Set(['Write', 'Edit', 'Bash', 'PythonExec', 'VfsToPyodide', 'PyodideToVfs', 'JSExec', 'NodeExec', 'CronCreate', 'CronDelete']);
 
 async function executeTool(name, input) {
+  const run = currentRunContext;
   try {
+    // Tool registries are rebuilt per conversation. Pin them immediately before
+    // dispatch so another concurrent run cannot leave us with its skill handlers.
+    rebuildToolDefs(activeEntryId, { skipRender: true });
     if (planMode && name !== 'ExitPlanMode' && name !== 'TodoWrite' && name !== 'AskUser') {
       const isMcp = mcpTools.find(t => t.name === name);
       const isBlockedSkillManagerWrite = name === 'SkillManager' && isSkillManagerWriteAction(input || {});
@@ -13270,7 +13303,7 @@ async function executeTool(name, input) {
       }
     }
     logMemEntry('read', `Tool: ${name}`);
-    flashTool(name);
+    flashTool(name, run);
     switch (name) {
       case 'Read': return await toolRead(input);
       case 'Write': { const r = await toolWrite(input); if (input?.file_path) markVfsTouched(input.file_path); return r; }
@@ -14524,14 +14557,17 @@ function toolTodoWrite(input) {
 }
 
 async function toolExitPlanMode(input) {
+  const run = currentRunContext;
   if (!planMode) return 'Error: Plan Mode is not active. You do not need to call ExitPlanMode.';
   const plan = String(input?.plan || '').trim();
   if (!plan) return 'Error: "plan" is required and must be the full plan as Markdown.';
   if (ralphRun?.active) return 'Error: Ralph Loop is active and cannot approve Plan Mode unattended. Continue read-only if useful, otherwise stop with a clear blocker and ask the user to disable Plan Mode or approve manually.';
   const verdict = await showPlanApprovalModal(plan);
+  if (run) activateConversationRun(run);
   if (verdict.approved) {
     planMode = false;
     if (typeof renderPlanButton === 'function') renderPlanButton();
+    if (typeof rebuildToolDefs === 'function') rebuildToolDefs();
     return 'Plan approved by user. Plan Mode has been disabled. You may now execute write tools to implement the plan.';
   }
   return `Plan rejected by user. Feedback:\n${verdict.feedback || '(no feedback given)'}\n\nStay in Plan Mode and revise the plan, then call ExitPlanMode again.`;
@@ -16351,7 +16387,14 @@ async function compactMemory(options = {}) {
   updateMemoryUI();
 }
 
-function flashTool(name) { const c = document.querySelector(`.tg-card[data-tool="${name}"]`); if (c) { c.classList.add('active'); setTimeout(() => c.classList.remove('active'), 1200); } }
+function flashTool(name, run = currentRunContext) {
+  if (run && !isRunVisible(run)) return;
+  const c = [...document.querySelectorAll('.tg-card[data-tool]')].find(card => card.dataset.tool === name);
+  if (!c) return;
+  clearTimeout(c._flashTimer);
+  c.classList.add('active');
+  c._flashTimer = setTimeout(() => { c.classList.remove('active'); c._flashTimer = null; }, 1200);
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // MESSAGE CONSTRUCTION (multi-provider)

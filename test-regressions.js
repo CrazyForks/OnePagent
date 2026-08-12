@@ -108,6 +108,72 @@ function testReasoningToolHistoryWithoutReasoningContent() {
   assert.equal(body.messages[3].content, 'WROTE output.html');
 }
 
+async function testConcurrentToolUi() {
+  const classes = new Set();
+  const card = {
+    dataset: { tool: 'Odd"] tool' },
+    classList: {
+      add: value => classes.add(value),
+      remove: value => classes.delete(value),
+      contains: value => classes.has(value),
+    },
+    _flashTimer: null,
+  };
+  let nextTimer = 0;
+  const timers = new Map();
+  const context = {
+    currentRunContext: { convId: 'background' },
+    visibleConvId: 'visible',
+    isRunVisible: run => run?.convId === context.visibleConvId,
+    document: { querySelectorAll: () => [card] },
+    setTimeout: fn => { const id = ++nextTimer; timers.set(id, fn); return id; },
+    clearTimeout: id => timers.delete(id),
+  };
+  vm.createContext(context);
+  vm.runInContext(slice('function flashTool', '// MESSAGE CONSTRUCTION'), context);
+
+  context.flashTool(card.dataset.tool, context.currentRunContext);
+  assert.equal(card.classList.contains('active'), false);
+  assert.equal(timers.size, 0);
+
+  const visibleRun = { convId: 'visible' };
+  context.flashTool(card.dataset.tool, visibleRun);
+  const firstTimer = card._flashTimer;
+  context.flashTool(card.dataset.tool, visibleRun);
+  assert.equal(card.classList.contains('active'), true);
+  assert.equal(timers.has(firstTimer), false);
+  timers.get(card._flashTimer)();
+  assert.equal(card.classList.contains('active'), false);
+
+  const toolUi = slice('function renderToolsGrid()', '// TOOL IMPLEMENTATIONS');
+  const grid = { _html: '', writes: 0, set innerHTML(value) { this._html = value; this.writes++; }, get innerHTML() { return this._html; } };
+  Object.assign(context, {
+    allToolsAnthropic: [{ name: 'Read', description: 'read' }],
+    disabledTools: new Set(),
+    isToolVisibleInUi: () => true,
+    document: { getElementById: () => grid },
+    esc: value => value,
+    iconHtml: value => value,
+  });
+  vm.runInContext(toolUi, context);
+  context.currentRunContext = { convId: 'background' };
+  context.renderToolsGrid();
+  assert.equal(grid.writes, 0);
+  context.currentRunContext = visibleRun;
+  context.renderToolsGrid();
+  assert.equal(grid.writes, 1);
+  assert.match(grid.innerHTML, /toggleToolEnabled\(this\.dataset\.tool\)/);
+
+  const switchBody = slice('async function switchConversation', 'async function deleteConversation');
+  assert.match(switchBody, /renderPlanButton\(\);\s*renderRalphButton\(\);\s*rebuildToolDefs\(\);/);
+  const executeBody = slice('async function executeTool', 'async function toolSkillManager');
+  assert.ok(executeBody.indexOf('rebuildToolDefs(activeEntryId, { skipRender: true })') < executeBody.indexOf('flashTool(name, run)'));
+  const planBody = slice('async function toolExitPlanMode', 'async function wsTestSearch');
+  assert.ok(planBody.indexOf('const run = currentRunContext') < planBody.indexOf('await showPlanApprovalModal'));
+  assert.ok(planBody.indexOf('activateConversationRun(run)') > planBody.indexOf('await showPlanApprovalModal'));
+  assert.match(slice('function showHitlModal', 'function _closeHitlModal'), /if \(_hitlModalResolver\) return Promise\.resolve/);
+}
+
 async function testDaytonaReconcile() {
   const remoteWrap = slice('async function _remoteWrap', 'function _parseBoxLine');
   assert.ok(remoteWrap.indexOf('if (before.incomplete)') < remoteWrap.indexOf('syncVfsToRemote'));
@@ -300,6 +366,6 @@ async function testDaytonaReconcile() {
   assert.equal(resolve('/outputs/new.txt', owner).content, 'x');
 }
 
-Promise.all([testModelFetch(), testServiceWorkerBoundary(), testDaytonaReconcile(), testReasoningToolHistoryWithoutReasoningContent()])
+Promise.all([testModelFetch(), testServiceWorkerBoundary(), testDaytonaReconcile(), testReasoningToolHistoryWithoutReasoningContent(), testConcurrentToolUi()])
   .then(() => console.log('regressions: ok'))
   .catch((error) => { console.error(error); process.exitCode = 1; });
